@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel"
 
@@ -73,6 +74,27 @@ func (c *SnapshotCache) Get(ctx context.Context, sandboxID string) (*SnapshotInf
 	return info, nil
 }
 
+// GetByTeam returns the last snapshot for a sandbox scoped to a specific team,
+// preventing cross-team data access at the DB query level.
+func (c *SnapshotCache) GetByTeam(ctx context.Context, sandboxID string, teamID uuid.UUID) (*SnapshotInfo, error) {
+	ctx, span := tracer.Start(ctx, "get last snapshot by team")
+	defer span.End()
+
+	key := fmt.Sprintf("%s:%s", sandboxID, teamID.String())
+	info, err := c.cache.GetOrSet(ctx, key, func(ctx context.Context, k string) (*SnapshotInfo, error) {
+		return c.fetchFromDBByTeam(ctx, sandboxID, teamID)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if info.NotFound {
+		return nil, ErrSnapshotNotFound
+	}
+
+	return info, nil
+}
+
 func (c *SnapshotCache) fetchFromDB(ctx context.Context, sandboxID string) (*SnapshotInfo, error) {
 	ctx, span := tracer.Start(ctx, "fetch last snapshot from DB")
 	defer span.End()
@@ -84,6 +106,30 @@ func (c *SnapshotCache) fetchFromDB(ctx context.Context, sandboxID string) (*Sna
 		}
 
 		return nil, fmt.Errorf("fetching last snapshot: %w", err)
+	}
+
+	return &SnapshotInfo{
+		Aliases:  row.Aliases,
+		Names:    row.Names,
+		Snapshot: row.Snapshot,
+		EnvBuild: row.EnvBuild,
+	}, nil
+}
+
+func (c *SnapshotCache) fetchFromDBByTeam(ctx context.Context, sandboxID string, teamID uuid.UUID) (*SnapshotInfo, error) {
+	ctx, span := tracer.Start(ctx, "fetch last snapshot by team from DB")
+	defer span.End()
+
+	row, err := c.db.GetLastSnapshotByTeam(ctx, queries.GetLastSnapshotByTeamParams{
+		SandboxID: sandboxID,
+		TeamID:    teamID,
+	})
+	if err != nil {
+		if dberrors.IsNotFoundError(err) {
+			return errNotFoundSentinel, nil
+		}
+
+		return nil, fmt.Errorf("fetching last snapshot by team: %w", err)
 	}
 
 	return &SnapshotInfo{

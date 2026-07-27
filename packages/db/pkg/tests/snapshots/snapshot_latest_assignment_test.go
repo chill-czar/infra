@@ -225,3 +225,38 @@ func TestGetLastSnapshot_AssignmentOrderDifferentFromBuildOrder(t *testing.T) {
 	assert.Equal(t, build1ID, snapshot.EnvBuild.ID,
 		"GetLastSnapshot should use assignment order, not build creation order")
 }
+
+// TestGetLastSnapshotByTeam_CrossTeamIsolation verifies that GetLastSnapshotByTeam
+// does not return a snapshot when queried with a teamID that does not own it.
+// This is the core security property introduced by the team-scoped query.
+func TestGetLastSnapshotByTeam_CrossTeamIsolation(t *testing.T) {
+	t.Parallel()
+	db := testutils.SetupDatabase(t)
+	ctx := t.Context()
+
+	// Create two distinct teams.
+	ownerTeamID := testutils.CreateTestTeam(t, db)
+	otherTeamID := testutils.CreateTestTeam(t, db)
+
+	baseTemplateID := testutils.CreateTestTemplate(t, db, ownerTeamID)
+
+	sandboxID := "sandbox-" + uuid.New().String()
+	snapshotTemplateID := "snapshot-template-" + uuid.New().String()
+
+	// Create a snapshot owned by ownerTeam.
+	testutils.UpsertTestSnapshot(t, ctx, db, snapshotTemplateID, sandboxID, ownerTeamID, baseTemplateID)
+
+	// Querying with the correct owner team must succeed.
+	_, err := db.SqlcClient.GetLastSnapshotByTeam(ctx, queries.GetLastSnapshotByTeamParams{
+		SandboxID: sandboxID,
+		TeamID:    ownerTeamID,
+	})
+	require.NoError(t, err, "GetLastSnapshotByTeam should return the snapshot for the owning team")
+
+	// Querying with a different team must return not-found.
+	_, err = db.SqlcClient.GetLastSnapshotByTeam(ctx, queries.GetLastSnapshotByTeamParams{
+		SandboxID: sandboxID,
+		TeamID:    otherTeamID,
+	})
+	require.Error(t, err, "GetLastSnapshotByTeam must not return a snapshot for a non-owning team")
+}
